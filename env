@@ -1,0 +1,11 @@
+# ── Required ──────────────────────────────────────────────────────────────────
+DISCORD_TOKEN=your_bot_token_here
+
+# ── Database (default: local SQLite, zero setup) ──────────────────────────────
+DATABASE_URL=sqlite+aiosqlite:///./data.db
+
+# ── TikTok polling interval in seconds (minimum 5) ───────────────────────────
+TIKTOK_CHECK_INTERVAL=60
+
+# ── Moderation log channel (optional, leave commented out to disable) ─────────
+# MODERATION_LOG_CHANNEL_ID=123456789012345678
