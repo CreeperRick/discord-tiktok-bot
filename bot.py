@@ -57,10 +57,11 @@ class TikTokBot(commands.Bot):
 
         await self._load_all_extensions()
 
-        # Global sync — can take up to 1 hour to propagate on first deploy.
-        # For instant dev feedback, sync to a specific guild instead:
-        #   await self.tree.sync(guild=discord.Object(id=YOUR_GUILD_ID))
-        synced = await self.tree.sync()
+        # Sync to your guild instantly (guild syncs are immediate).
+        # Switch to `await self.tree.sync()` for global rollout when ready.
+        TEST_GUILD = discord.Object(id=1495372441860571187)
+        self.tree.copy_global_to(guild=TEST_GUILD)
+        synced = await self.tree.sync(guild=TEST_GUILD)
         logger.info("Slash commands synced (%d registered)", len(synced))
 
     async def close(self) -> None:
