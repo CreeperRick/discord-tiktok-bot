@@ -1,205 +1,133 @@
-# apps/tiktok/commands.py
+# bot.py
 """
-Slash commands for managing TikTok subscriptions.
+Entry point for the TikTok Discord bot.
 
-/tiktok add <username> [channel]   — subscribe to a TikTok account
-/tiktok remove <username>          — unsubscribe
-/tiktok list                       — show all subscriptions in this guild
-/help                              — show bot help
+Extension auto-discovery: every package under apps/ that contains any of
+  commands.py | monitor.py | automod.py
+is loaded as a discord.py cog, provided it exports `async def setup(bot)`.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import pkgutil
+from pathlib import Path
 
 import discord
-from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import delete, select
 
-from utils.database import TikTokSubscription, get_session
-from utils import embeds
+from config import settings
+from utils.database import init_db
+from utils.logging_conf import setup_logging
 
-logger = logging.getLogger(__name__)
+logger = setup_logging()
+
+APPS_DIR = Path(__file__).parent / "apps"
+
+# Sub-module filenames we look for inside each app package
+DISCOVERABLE_SUBMODULES = ("commands", "monitor", "automod")
 
 
-class TikTokCommands(commands.Cog, name="TikTok"):
-    """Manage which TikTok accounts are monitored in this server."""
+class TikTokBot(commands.Bot):
+    def __init__(self) -> None:
+        # Grant only the privileges this bot actually needs.
+        # Intents.all() was the original — that's a security/privacy risk.
+        intents = discord.Intents.none()
+        intents.guilds = True           # channel access, guild events
+        intents.guild_messages = True   # read messages in guilds
+        intents.message_content = True  # read message body (privileged)
+        intents.members = True          # needed by automod for member events
 
-    def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
+        super().__init__(
+            command_prefix=commands.when_mentioned,  # slash-commands only bot
+            intents=intents,
+            help_command=None,          # we provide /help via slash commands
+        )
 
-    # ── /tiktok group ─────────────────────────────────────────────────────
+    # ── Lifecycle ─────────────────────────────────────────────────────────
 
-    tiktok_group = app_commands.Group(
-        name="tiktok",
-        description="Manage TikTok account monitoring",
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
+    async def setup_hook(self) -> None:
+        """
+        Runs exactly once before the bot connects.
+        All one-time init (DB, extensions, slash sync) belongs here — NOT in
+        on_ready, which fires on every reconnect.
+        """
+        await init_db()
+        logger.info("Database initialised")
 
-    @tiktok_group.command(name="add", description="Subscribe to a TikTok account")
-    @app_commands.describe(
-        username="TikTok username (without @)",
-        channel="Channel to send notifications in (defaults to current channel)",
-        announce_posts="Announce new posts?",
-        announce_live="Announce when user goes live?",
-    )
-    async def tiktok_add(
-        self,
-        interaction: discord.Interaction,
-        username: str,
-        channel: discord.TextChannel | None = None,
-        announce_posts: bool = True,
-        announce_live: bool = True,
+        await self._load_all_extensions()
+
+        # Sync to your guild instantly (guild syncs are immediate).
+        # Switch to `await self.tree.sync()` for global rollout when ready.
+        TEST_GUILD = discord.Object(id=1495372441860571187)
+        self.tree.copy_global_to(guild=TEST_GUILD)
+        synced = await self.tree.sync(guild=TEST_GUILD)
+        logger.info("Slash commands synced (%d registered)", len(synced))
+
+    async def close(self) -> None:
+        """Graceful shutdown — lets cog background tasks clean up properly."""
+        logger.info("Shutting down…")
+        await super().close()
+
+    async def on_ready(self) -> None:
+        """Fires on every successful (re)connection — keep lightweight."""
+        assert self.user is not None
+        logger.info("✅  Logged in as %s (ID: %s)", self.user, self.user.id)
+        await self.change_presence(
+            activity=discord.Game(name="TikTok Lives | /help")
+        )
+
+    async def on_error(
+        self, event_method: str, /, *args: object, **kwargs: object
     ) -> None:
-        await interaction.response.defer(ephemeral=True)
+        """Surface unhandled exceptions from event listeners — never silently swallow."""
+        logger.exception("Unhandled error in event '%s'", event_method)
 
-        notify_channel = channel or interaction.channel
-        assert interaction.guild is not None
-        assert isinstance(notify_channel, discord.TextChannel)
+    # ── Extension loading ─────────────────────────────────────────────────
 
-        username = username.lstrip("@").strip().lower()
-        if not username:
-            await interaction.followup.send(
-                embed=embeds.error("Invalid username", "Username cannot be empty."),
-                ephemeral=True,
-            )
+    async def _load_all_extensions(self) -> None:
+        """
+        Walk every sub-package under apps/ and attempt to load the standard
+        sub-modules. Only real packages (with __init__.py) are scanned.
+        """
+        if not APPS_DIR.is_dir():
+            logger.warning("apps/ directory not found — no extensions loaded")
             return
 
-        async with get_session() as session:
-            # Check for duplicate
-            existing = await session.scalar(
-                select(TikTokSubscription).where(
-                    TikTokSubscription.guild_id == interaction.guild.id,
-                    TikTokSubscription.tiktok_username == username,
-                )
-            )
-            if existing:
-                await interaction.followup.send(
-                    embed=embeds.warning(
-                        "Already subscribed",
-                        f"@{username} is already being monitored in <#{existing.notify_channel_id}>.",
-                    ),
-                    ephemeral=True,
-                )
-                return
+        for pkg in pkgutil.iter_modules([str(APPS_DIR)]):
+            if not pkg.ispkg:
+                continue  # skip loose .py files at the top of apps/
+            for submodule in DISCOVERABLE_SUBMODULES:
+                await self._try_load(f"apps.{pkg.name}.{submodule}")
 
-            session.add(
-                TikTokSubscription(
-                    guild_id=interaction.guild.id,
-                    tiktok_username=username,
-                    notify_channel_id=notify_channel.id,
-                    announce_posts=announce_posts,
-                    announce_live=announce_live,
-                )
-            )
-
-        logger.info(
-            "Guild %s subscribed to @%s → #%s",
-            interaction.guild.id,
-            username,
-            notify_channel.name,
-        )
-        await interaction.followup.send(
-            embed=embeds.success(
-                "Subscription added",
-                f"Now monitoring **@{username}** and posting alerts in {notify_channel.mention}.",
-            ),
-            ephemeral=True,
-        )
-
-    @tiktok_group.command(name="remove", description="Stop monitoring a TikTok account")
-    @app_commands.describe(username="TikTok username (without @)")
-    async def tiktok_remove(
-        self,
-        interaction: discord.Interaction,
-        username: str,
-    ) -> None:
-        await interaction.response.defer(ephemeral=True)
-        assert interaction.guild is not None
-
-        username = username.lstrip("@").strip().lower()
-
-        async with get_session() as session:
-            result = await session.execute(
-                delete(TikTokSubscription).where(
-                    TikTokSubscription.guild_id == interaction.guild.id,
-                    TikTokSubscription.tiktok_username == username,
-                )
-            )
-
-        if result.rowcount == 0:
-            await interaction.followup.send(
-                embed=embeds.error("Not found", f"No subscription for @{username} in this server."),
-                ephemeral=True,
-            )
-            return
-
-        logger.info("Guild %s unsubscribed from @%s", interaction.guild.id, username)
-        await interaction.followup.send(
-            embed=embeds.success("Unsubscribed", f"Stopped monitoring **@{username}**."),
-            ephemeral=True,
-        )
-
-    @tiktok_group.command(name="list", description="List all monitored TikTok accounts")
-    async def tiktok_list(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        assert interaction.guild is not None
-
-        async with get_session() as session:
-            rows = list(
-                await session.scalars(
-                    select(TikTokSubscription).where(
-                        TikTokSubscription.guild_id == interaction.guild.id
-                    )
-                )
-            )
-
-        if not rows:
-            await interaction.followup.send(
-                embed=embeds.info("No subscriptions", "Use `/tiktok add` to start monitoring an account."),
-                ephemeral=True,
-            )
-            return
-
-        lines = [
-            f"**@{row.tiktok_username}** → <#{row.notify_channel_id}> "
-            f"(posts: {'✅' if row.announce_posts else '❌'}  live: {'✅' if row.announce_live else '❌'})"
-            for row in rows
-        ]
-        embed = embeds.info(
-            f"Monitored TikTok accounts ({len(rows)})",
-            "\n".join(lines),
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    # ── /help ─────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="help", description="Show bot commands and usage")
-    async def help_command(self, interaction: discord.Interaction) -> None:
-        embed = embeds.info(
-            "TikTok Bot — Help",
-            "Monitor TikTok accounts and receive live/post alerts in your server.",
-        )
-        embed.add_field(
-            name="/tiktok add <username> [channel]",
-            value="Subscribe to a TikTok account. Requires **Manage Server**.",
-            inline=False,
-        )
-        embed.add_field(
-            name="/tiktok remove <username>",
-            value="Stop monitoring an account. Requires **Manage Server**.",
-            inline=False,
-        )
-        embed.add_field(
-            name="/tiktok list",
-            value="Show all monitored accounts in this server.",
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def _try_load(self, ext_path: str) -> None:
+        """
+        Load a single extension, distinguishing between:
+          - File doesn't exist   → silently skip (expected)
+          - No setup() function  → warn (developer mistake)
+          - Any other error      → log full traceback (bug — must be visible)
+        """
+        try:
+            await self.load_extension(ext_path)
+            logger.info("Loaded: %s", ext_path)
+        except commands.ExtensionNotFound:
+            pass  # sub-module simply doesn't exist for this app — fine
+        except commands.NoEntryPointError:
+            logger.warning("'%s' has no setup() — skipping", ext_path)
+        except Exception:
+            # Syntax errors, import failures, runtime crashes — always loud
+            logger.exception("Failed to load '%s'", ext_path)
 
 
-async def setup(bot: commands.Bot) -> None:
-    cog = TikTokCommands(bot)
-    await bot.add_cog(cog)
-    # Register the /tiktok group — must be done after adding the cog
-    bot.tree.add_command(cog.tiktok_group)
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+async def main() -> None:
+    async with TikTokBot() as bot:
+        await bot.start(settings.discord_token)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Stopped by user (KeyboardInterrupt)")
