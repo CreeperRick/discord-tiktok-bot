@@ -1,0 +1,17 @@
+# requirements.txt
+# Use ranges so security patches install automatically,
+# but breaking major versions are blocked.
+
+# Discord
+discord.py>=2.4.0,<3.0.0
+
+# Config validation (bundles python-dotenv — no need to list it separately)
+pydantic-settings>=2.2.0,<3.0.0
+
+# TikTok metadata scraping — pin a floor because TikTok support breaks on old versions
+yt-dlp>=2024.12.23
+
+# Async database stack
+aiosqlite>=0.20.0,<1.0.0              # SQLite driver for dev / small deployments
+sqlalchemy[asyncio]>=2.0.36,<3.0.0   # ORM + async core
+asyncpg>=0.30.0,<1.0.0               # PostgreSQL async driver for production

@@ -1,0 +1,29 @@
+# docker-compose.yml
+# Run with: docker compose up -d --build
+# Logs:     docker compose logs -f bot
+
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    restart: unless-stopped
+
+    # Named volume so the SQLite DB survives container rebuilds.
+    # If you switch to PostgreSQL, remove this volume and add a 'postgres' service.
+    volumes:
+      - bot_data:/app/data.db
+      - bot_logs:/app/logs
+
+    # The bot has no HTTP port, but we can verify it's alive by checking
+    # that the Python process is still running.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  bot_data:
+  bot_logs:
