@@ -4,6 +4,7 @@
 
 # Discord
 discord.py>=2.4.0,<3.0.0
+discord.py[voice]
 
 # Config validation (bundles python-dotenv — no need to list it separately)
 pydantic-settings>=2.2.0,<3.0.0
@@ -15,3 +16,7 @@ yt-dlp>=2024.12.23
 aiosqlite>=0.20.0,<1.0.0              # SQLite driver for dev / small deployments
 sqlalchemy[asyncio]>=2.0.36,<3.0.0   # ORM + async core
 asyncpg>=0.30.0,<1.0.0               # PostgreSQL async driver for production
+
+
+spotipy
+PyNaCl
